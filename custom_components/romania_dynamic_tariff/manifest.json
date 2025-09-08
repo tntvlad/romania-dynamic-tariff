@@ -1,0 +1,12 @@
+{
+  "domain": "romania_dynamic_tariff",
+  "name": "Romania Dynamic Electricity Tariff",
+  "documentation": "https://github.com/tntvlad/romania-dynamic-tariff",
+  "issue_tracker": "https://github.com/tntvlad/romania-dynamic-tariff/issues",
+  "dependencies": [],
+  "codeowners": ["@tntvlad"],
+  "requirements": ["pytz"],
+  "version": "1.0.0",
+  "config_flow": true,
+  "iot_class": "cloud_polling"
+}
