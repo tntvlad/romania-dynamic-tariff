@@ -15,7 +15,7 @@ A Home Assistant integration that downloads and displays electricity prices from
 
 ## Installation
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=tntvlad&repository=https%3A%2F%2Fgithub.com%2Ftntvlad%2Fromania-dynamic-tariff.git&category=Energy)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=tntvlad&repository=romania-dynamic-tariff&category=integration)
 
 Or
 
