@@ -2,7 +2,6 @@
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/custom-components/hacs)
 [![GitHub Release](https://img.shields.io/github/release/tntvlad/romania-dynamic-tariff.svg)](https://github.com/tntvlad/romania-dynamic-tariff/releases)
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=tntvlad&repository=https%3A%2F%2Fgithub.com%2Ftntvlad%2Fromania-dynamic-tariff.git&category=Energy)
 
 A Home Assistant integration that downloads and displays electricity prices from the Romanian Electricity Market.
 
@@ -16,7 +15,11 @@ A Home Assistant integration that downloads and displays electricity prices from
 
 ## Installation
 
-### HACS Installation (Recommended)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=tntvlad&repository=https%3A%2F%2Fgithub.com%2Ftntvlad%2Fromania-dynamic-tariff.git&category=Energy)
+
+Or
+
+### HACS Installation 
 
 1. Make sure [HACS](https://hacs.xyz/) is installed in your Home Assistant instance
 2. Add this repository as a custom repository in HACS:
