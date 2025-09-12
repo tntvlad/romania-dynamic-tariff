@@ -1,6 +1,6 @@
 {
   "name": "Romania Dynamic Tariff",
-  "content_in_root": true,
+  "content_in_root": false,
   "country": "RO",
   "homeassistant": "2023.5.0",
   "hacs": "1.35.0",
