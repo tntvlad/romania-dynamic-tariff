@@ -25,7 +25,7 @@ class RomaniaDynamicConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema({
-                vol.Required("start_date", default="2023-12-14"): str,
+                vol.Required("start_date", default="2025-08-14"): str,
                 vol.Optional("name", default="Romania Dynamic Tariff"): str,
             }),
             errors=errors,
