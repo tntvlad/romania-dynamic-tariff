@@ -634,9 +634,11 @@ class DynamicDataCoordinator(DataUpdateCoordinator):
         """Build the public data dict from the database rows."""
         now = datetime.now()
         today = now.date()
+        yesterday = today - timedelta(days=1)
         tomorrow = today + timedelta(days=1)
         current_hour = now.hour
 
+        yesterday_rows = await self.database.async_get_day(yesterday.strftime("%Y-%m-%d"))
         today_rows = await self.database.async_get_day(today.strftime("%Y-%m-%d"))
         tomorrow_rows = await self.database.async_get_day(tomorrow.strftime("%Y-%m-%d"))
 
@@ -646,11 +648,16 @@ class DynamicDataCoordinator(DataUpdateCoordinator):
             if int(r["hour"]) == current_hour:
                 current_price = float(r["price"])
 
-        raw_today, raw_tomorrow = [], []
+        # Yesterday is exposed so cards can show a rolling "last 24h" window
+        # (part of the previous day) together with today and tomorrow.
+        raw_yesterday, raw_today, raw_tomorrow = [], [], []
+        for r in yesterday_rows:
+            raw_yesterday.append(self._row_to_slice(yesterday, r))
         for r in today_rows:
             raw_today.append(self._row_to_slice(today, r))
         for r in tomorrow_rows:
             raw_tomorrow.append(self._row_to_slice(tomorrow, r))
+        yesterday_prices = [float(r["price"]) for r in yesterday_rows]
 
         forecast_prices = [
             {
@@ -709,9 +716,11 @@ class DynamicDataCoordinator(DataUpdateCoordinator):
             "progress": backfill["progress"],
             "backfill": backfill,
             "stats": stats,
+            "yesterday": yesterday_prices,
             "today": daily_prices,
             "tomorrow": tomorrow_prices,
             "tomorrow_valid": bool(tomorrow_rows),
+            "raw_yesterday": raw_yesterday,
             "raw_today": raw_today,
             "raw_tomorrow": raw_tomorrow,
             "region": "RO",
@@ -839,9 +848,11 @@ class DynamicCurrentPriceSensor(DynamicBaseSensor):
             "region": data.get("region", "RO"),
             "low_price": stats.get("low_price", False),
             "price_percent_to_average": stats.get("price_percent_to_average", 1.0),
+            "yesterday": data.get("yesterday", []),
             "today": data.get("today", []),
             "tomorrow": data.get("tomorrow", []),
             "tomorrow_valid": data.get("tomorrow_valid", False),
+            "raw_yesterday": data.get("raw_yesterday", []),
             "raw_today": data.get("raw_today", []),
             "raw_tomorrow": data.get("raw_tomorrow", []),
             "last_updated": data.get("last_updated"),

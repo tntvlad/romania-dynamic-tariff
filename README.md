@@ -21,7 +21,8 @@ history, configurable retention and a live progress sensor.
 - One-time, automatic import of any existing `romania_dynamic_data/*.json|.csv`
   files into the database
 - Provides current hour, daily average, and next-hour forecast sensors with rich
-  attributes (peak / off-peak / min / max, raw hourly data for cards)
+  attributes (peak / off-peak / min / max, raw hourly data for cards, including
+  **yesterday** so cards can show a rolling last-24 h window)
 - Correct Romanian timezone handling (EET/EEST)
 
 ## Requirements
@@ -158,10 +159,11 @@ Extra attributes: `status` (text, e.g. `Backfilling (42%)` / `Backfill complete`
 - `low_price`: `true` when the current price is below the daily average
 - `price_percent_to_average`: Current price / daily average (1.0 = equal)
 - `unit` / `currency` / `region`: `kWh` / `RON` / `RO`
-- `today` / `tomorrow`: Flat lists of hourly prices
+- `yesterday` / `today` / `tomorrow`: Flat lists of hourly prices
 - `tomorrow_valid`: Whether next-day data is available yet
-- `raw_today` / `raw_tomorrow`: Hourly slices with ISO timestamps (`start`,
-  `end`, `value`) for cards
+- `raw_yesterday` / `raw_today` / `raw_tomorrow`: Hourly slices with ISO
+  timestamps (`start`, `end`, `value`) for cards. `raw_yesterday` is what makes
+  a rolling "last 24 h" view possible across midnight.
 - `storage`: Database path, row count and stored date span
 - `last_updated`, `source`
 
@@ -169,7 +171,17 @@ Extra attributes: `status` (text, e.g. `Backfilling (42%)` / `Backfill complete`
 
 ## Lovelace card example
 
-A price column chart using [ApexCharts Card](https://github.com/RomRider/apexcharts-card):
+### Last 24 h + everything that is still to come
+
+The default README example used to combine `graph_span: 2d` with
+`span.start: day`/`offset: '-1d'`, which draws the window *yesterday → tomorrow*
+while the series only contained *today → tomorrow*. The result is a misaligned
+chart that seems to start and end at odd hours (e.g. only noon → midnight).
+
+The card below shows the **previous 24 hours together with every available
+future price**. It anchors the window at the start of *yesterday* and spans three
+full days, so the right edge of the chart lands exactly on the **last published
+hour of tomorrow** — nothing is cut off and nothing is faked:
 
 ```yaml
 type: custom:apexcharts-card
@@ -178,17 +190,105 @@ header:
   title: Romania Dynamic Electricity Prices
   show_states: true
   colorize_states: true
-graph_span: 2d
+graph_span: 3d
+span:
+  start: day        # window starts at the beginning of…
+  offset: '-1d'     # …yesterday (24 h of history)…
+now:
+  show: true
+  label: Acum
+series:
+  - entity: sensor.dynamic_current_hour_price
+    name: Price
+    type: column
+    color: '#e74c3c'
+    data_generator: |
+      // yesterday 00:00 → tomorrow 24:00, i.e. past + all published future
+      const prices = [
+        ...(entity.attributes.raw_yesterday || []),
+        ...(entity.attributes.raw_today || []),
+        ...(entity.attributes.raw_tomorrow || []),
+      ];
+      return prices.map((entry) => [new Date(entry.start).getTime(), entry.value]);
+```
+
+> **Why three days?** Day-ahead prices are only published one day ahead, so the
+> last price that can ever exist is the final hour of *tomorrow*. Anchoring the
+> graph from *yesterday 00:00* to *tomorrow 24:00* guarantees the chart always
+> ends on that last available price, while still showing at least the last 24 h.
+> Before ~13:00 the tomorrow columns are simply empty because OPCOM has not
+> published them yet.
+
+### Rolling 24 h + 24 h (always centred on now)
+
+If you prefer a window that is always exactly 24 h behind and 24 h ahead of the
+current time, use `span.start: hour` with an offset instead:
+
+```yaml
+type: custom:apexcharts-card
+header:
+  show: true
+  show_states: true
+  colorize_states: true
+graph_span: 48h
+span:
+  start: hour
+  offset: '-24h'
+now:
+  show: true
+  label: Acum
+series:
+  - entity: sensor.dynamic_current_hour_price
+    name: Price
+    type: column
+    data_generator: |
+      const from = start.getTime(); // left edge of the graph
+      return [
+        ...(entity.attributes.raw_yesterday || []),
+        ...(entity.attributes.raw_today || []),
+        ...(entity.attributes.raw_tomorrow || []),
+      ]
+        .map((entry) => [new Date(entry.start).getTime(), entry.value])
+        .filter((point) => point[0] >= from);
+```
+
+### Optional: colour cheap vs expensive hours
+
+To highlight cheap hours in green and expensive ones in red, enable the
+`color_threshold` experimental feature and tune the cut-offs (values are in
+`lei/MWh`, the daily average works well as a middle threshold):
+
+```yaml
+type: custom:apexcharts-card
+experimental:
+  color_threshold: true
+graph_span: 3d
 span:
   start: day
   offset: '-1d'
+now:
+  show: true
+  label: Acum
 series:
   - entity: sensor.dynamic_current_hour_price
+    name: Price
     type: column
     data_generator: |
-      return entity.attributes.raw_today.concat(entity.attributes.raw_tomorrow).map((entry) => {
-        return [new Date(entry.start).getTime(), entry.value];
-      });
-    name: Price
-    color: '#e74c3c'
+      const prices = [
+        ...(entity.attributes.raw_yesterday || []),
+        ...(entity.attributes.raw_today || []),
+        ...(entity.attributes.raw_tomorrow || []),
+      ];
+      return prices.map((entry) => [new Date(entry.start).getTime(), entry.value]);
+    color_threshold:
+      - value: 0
+        color: '#2ecc71'   # cheap
+      - value: 400
+        color: '#f1c40f'   # mid
+      - value: 800
+        color: '#e74c3c'   # expensive
 ```
+
+> `raw_yesterday` was added in **v1.2.0**. On older versions only `raw_today` and
+> `raw_tomorrow` exist, so the left third of the three-day cards will be empty
+> and a rolling 24 h view only starts at midnight.
