@@ -196,12 +196,14 @@ span:
   offset: '-1d'     # …yesterday (24 h of history)…
 now:
   show: true
-  label: Acum
+  label: Now
 series:
   - entity: sensor.dynamic_current_hour_price
-    name: Price
+    name: Price now
     type: column
     color: '#e74c3c'
+    show:
+      in_header: before_now   # header shows the current hour (e.g. 10:00–11:00)
     data_generator: |
       // yesterday 00:00 → tomorrow 24:00, i.e. past + all published future
       const prices = [
@@ -218,6 +220,13 @@ series:
 > ends on that last available price, while still showing at least the last 24 h.
 > Before ~13:00 the tomorrow columns are simply empty because OPCOM has not
 > published them yet.
+
+> **Why `in_header: before_now`?** With `header.show_states: true`, the card
+> displays the **last value of the series** by default. Because this series runs
+> into the future, that would be tomorrow's final hour — not the price you are
+> paying right now. `before_now` pins the header to the value just before the
+> current time, i.e. the current hour (at 10:36 it shows the 10:00–11:00 price).
+> Use `after_now` if you would rather see the next hour.
 
 ### Rolling 24 h + 24 h (always centred on now)
 
@@ -236,11 +245,13 @@ span:
   offset: '-24h'
 now:
   show: true
-  label: Acum
+  label: Now
 series:
   - entity: sensor.dynamic_current_hour_price
-    name: Price
+    name: Price now
     type: column
+    show:
+      in_header: before_now
     data_generator: |
       const from = start.getTime(); // left edge of the graph
       return [
@@ -268,7 +279,7 @@ span:
   offset: '-1d'
 now:
   show: true
-  label: Acum
+  label: Now
 series:
   - entity: sensor.dynamic_current_hour_price
     name: Price
