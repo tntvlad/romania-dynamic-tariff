@@ -2,12 +2,10 @@
 from __future__ import annotations
 
 import asyncio
-import csv
 import json
 import logging
 import os
 import shutil
-import statistics
 from datetime import datetime, timedelta, date, time as dt_time
 
 import aiohttp
@@ -19,6 +17,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from . import core
 from .const import (
     BACKFILL_CHUNK,
     BACKFILL_CONCURRENCY,
@@ -183,13 +182,16 @@ class DynamicDataCoordinator(DataUpdateCoordinator):
                         payload = json.load(fh)
                     rows = [
                         {
-                            "hour": int(e["hour"]),
                             "interval": int(e.get("interval", int(e["hour"]) + 1)),
                             "price": float(e["price"]),
                             "volume": float(e.get("volume", 0)),
                         }
                         for e in payload.get("hourly_data", [])
                     ]
+                    # Old files carry hourly numbering (1..25): spread them
+                    # into 15-minute rows so the database stays uniform.
+                    if core.is_hourly_resolution(rows):
+                        rows = core.expand_hourly_to_quarterly(rows)
                 elif os.path.exists(csv_path):
                     with open(csv_path, "r", encoding="utf-8") as fh:
                         content = fh.read()
@@ -554,146 +556,96 @@ class DynamicDataCoordinator(DataUpdateCoordinator):
 
     # --------------------------------------------------------------- parse
     def _parse_csv_content(self, csv_content: str, target_date: date) -> list[dict]:
-        """Parse the OPCOM CSV into hourly rows (no file writes)."""
-        lines = csv_content.strip().split("\n")
+        """Parse the OPCOM CSV into 15-minute rows (no file writes)."""
+        del target_date  # kept for signature compatibility; unused by the parser
+        rows = core.parse_opcom_csv(csv_content)
 
-        hourly_section_start = -1
-        for i, line in enumerate(lines):
-            if "Interval" in line and "Pret de Inchidere" in line:
-                hourly_section_start = i + 1
-                break
-
-        if hourly_section_start == -1:
-            return []
-
-        hourly_data: list[dict] = []
-
-        for i in range(hourly_section_start, len(lines)):
-            line = lines[i].strip()
-            if not line:
-                continue
-            try:
-                row = None
-                for delimiter in (",", ";", "\t"):
-                    parsed = list(csv.reader([line], delimiter=delimiter))[0]
-                    if len(parsed) >= 3:
-                        row = parsed
-                        break
-                if row is None:
-                    continue
-
-                row = [cell.strip('"').strip() for cell in row]
-                if len(row) < 3 or row[0].lower() != "romania":
-                    continue
-
-                try:
-                    interval = int(row[1])
-                    price_clean = row[2].replace(",", ".").replace(" ", "")
-                    price = float(price_clean)
-                    volume_clean = (row[3].replace(",", ".").replace(" ", "")
-                                    if len(row) > 3 else "0")
-                    volume = float(volume_clean) if volume_clean else 0
-                    hour = interval - 1
-                except (ValueError, IndexError):
-                    continue
-
-                hourly_data.append(
-                    {
-                        "interval": interval,
-                        "hour": hour,
-                        "price": price,
-                        "volume": volume,
-                    }
-                )
-            except (ValueError, IndexError):
-                continue
-
-        # If no hourly rows were found, fall back to the daily average.
-        if not hourly_data:
-            avg_price = 0.0
-            for line in lines:
-                if "ROPEX_DAM_Base" in line and "1-24" in line:
-                    try:
-                        parts = line.split(",")
-                        if len(parts) >= 2:
-                            avg_price = float(parts[1].strip('"').replace(",", "."))
-                            break
-                    except ValueError:
-                        continue
-            if avg_price > 0:
-                hourly_data = [
-                    {"interval": h + 1, "hour": h, "price": avg_price, "volume": 0}
-                    for h in range(24)
+        # Fallback: if no per-interval rows were usable, fall back to OPCOM's
+        # daily average banner and store a flat, degraded price series.
+        if not rows:
+            avg_price = core.opcom_daily_average(csv_content)
+            if avg_price and avg_price > 0:
+                rows = [
+                    {"interval": interval, "price": avg_price, "volume": 0}
+                    for interval in range(1, core.SLOTS_PER_DAY + 1)
                 ]
 
-        hourly_data.sort(key=lambda x: x["hour"])
-        return hourly_data
+        return rows
 
     # ---------------------------------------------------------------- read
     async def _load_current_data(self):
         """Build the public data dict from the database rows."""
-        now = datetime.now()
+        now = datetime.now(ROMANIAN_TIMEZONE)
         today = now.date()
         yesterday = today - timedelta(days=1)
         tomorrow = today + timedelta(days=1)
-        current_hour = now.hour
 
         yesterday_rows = await self.database.async_get_day(yesterday.strftime("%Y-%m-%d"))
         today_rows = await self.database.async_get_day(today.strftime("%Y-%m-%d"))
         tomorrow_rows = await self.database.async_get_day(tomorrow.strftime("%Y-%m-%d"))
 
-        daily_prices = [float(r["price"]) for r in today_rows]
-        current_price = 0.0
-        for r in today_rows:
-            if int(r["hour"]) == current_hour:
-                current_price = float(r["price"])
+        # Current 15-minute block. Sparse days (a few intervals without a
+        # published price) fall back to the most recent stored interval.
+        today_by_interval = {int(r["interval"]): float(r["price"]) for r in today_rows}
+        max_interval_today = max(today_by_interval, default=core.SLOTS_PER_DAY)
+        current_interval = core.interval_for_local_now(
+            now, ROMANIAN_TIMEZONE, max_interval_today
+        )
+        current_price = today_by_interval.get(current_interval)
+        if current_price is None and today_by_interval:
+            older = [iv for iv in today_by_interval if iv <= current_interval]
+            current_price = today_by_interval[
+                max(older) if older else max(today_by_interval)
+            ]
+        if current_price is None:
+            current_price = 0.0
 
         # Yesterday is exposed so cards can show a rolling "last 24h" window
         # (part of the previous day) together with today and tomorrow.
         raw_yesterday, raw_today, raw_tomorrow = [], [], []
         for r in yesterday_rows:
-            raw_yesterday.append(self._row_to_slice(yesterday, r))
+            raw_yesterday.append(
+                core.row_to_slice(
+                    yesterday, int(r["interval"]), r["price"], ROMANIAN_TIMEZONE
+                )
+            )
         for r in today_rows:
-            raw_today.append(self._row_to_slice(today, r))
+            raw_today.append(
+                core.row_to_slice(
+                    today, int(r["interval"]), r["price"], ROMANIAN_TIMEZONE
+                )
+            )
         for r in tomorrow_rows:
-            raw_tomorrow.append(self._row_to_slice(tomorrow, r))
+            raw_tomorrow.append(
+                core.row_to_slice(
+                    tomorrow, int(r["interval"]), r["price"], ROMANIAN_TIMEZONE
+                )
+            )
         yesterday_prices = [float(r["price"]) for r in yesterday_rows]
-
-        forecast_prices = [
-            {
-                "timestamp": self._row_datetime(tomorrow, r).strftime("%Y-%m-%d %H:%M:%S"),
-                "price": float(r["price"]),
-                "hour": int(r["hour"]),
-            }
-            for r in tomorrow_rows
-        ]
+        today_prices = [float(r["price"]) for r in today_rows]
         tomorrow_prices = [float(r["price"]) for r in tomorrow_rows]
 
-        # Next hour price
-        if current_hour < 23 and len(daily_prices) > current_hour + 1:
-            next_hour_price = daily_prices[current_hour + 1]
-        elif forecast_prices:
-            next_hour_price = forecast_prices[0]["price"]
-        else:
-            next_hour_price = 0.0
-
-        # Statistics for today
-        stats = {}
-        if daily_prices:
-            stats["average"] = sum(daily_prices) / len(daily_prices)
-            off_peak_1 = daily_prices[:8] if len(daily_prices) >= 8 else []
-            stats["off_peak_1"] = sum(off_peak_1) / len(off_peak_1) if off_peak_1 else 0
-            off_peak_2 = daily_prices[20:] if len(daily_prices) >= 20 else []
-            stats["off_peak_2"] = sum(off_peak_2) / len(off_peak_2) if off_peak_2 else 0
-            peak = daily_prices[8:20] if len(daily_prices) >= 20 else []
-            stats["peak"] = sum(peak) / len(peak) if peak else 0
-            stats["min"] = min(daily_prices) if daily_prices else 0
-            stats["max"] = max(daily_prices) if daily_prices else 0
-            stats["mean"] = statistics.mean(daily_prices) if daily_prices else 0
-            stats["low_price"] = current_price < stats["average"]
-            stats["price_percent_to_average"] = (
-                current_price / stats["average"] if stats["average"] > 0 else 1.0
+        forecast_prices = [
+            core.forecast_entry(
+                tomorrow, int(r["interval"]), r["price"], ROMANIAN_TIMEZONE
             )
+            for r in tomorrow_rows
+        ]
+
+        # Next 15-minute block price (this day, else the start of tomorrow).
+        next_interval_price = today_by_interval.get(current_interval + 1)
+        if next_interval_price is None and forecast_prices:
+            next_interval_price = forecast_prices[0]["price"]
+        if next_interval_price is None:
+            next_interval_price = 0.0
+
+        # Statistics for today using the official OPCOM peak/off-peak bands.
+        stats = core.compute_stats(today_rows)
+        stats["current_interval"] = current_interval
+        stats["low_price"] = current_price < stats.get("average", 0)
+        stats["price_percent_to_average"] = (
+            current_price / stats["average"] if stats.get("average", 0) > 0 else 1.0
+        )
 
         db_stats = await self.database.async_stats()
         forecast_status = "CSV Data Available" if forecast_prices else "Forecast Pending"
@@ -706,9 +658,11 @@ class DynamicDataCoordinator(DataUpdateCoordinator):
 
         return {
             "current_price": current_price,
+            "current_interval": current_interval,
+            "resolution": core.INTERVAL_RESOLUTION,
             "daily_average": stats.get("average", 0),
-            "next_hour_price": next_hour_price,
-            "daily_prices": daily_prices,
+            "next_interval_price": next_interval_price,
+            "daily_prices": today_prices,
             "forecast_prices": forecast_prices,
             "download_status": status,
             "forecast_status": forecast_status,
@@ -717,7 +671,7 @@ class DynamicDataCoordinator(DataUpdateCoordinator):
             "backfill": backfill,
             "stats": stats,
             "yesterday": yesterday_prices,
-            "today": daily_prices,
+            "today": today_prices,
             "tomorrow": tomorrow_prices,
             "tomorrow_valid": bool(tomorrow_rows),
             "raw_yesterday": raw_yesterday,
@@ -757,32 +711,20 @@ class DynamicDataCoordinator(DataUpdateCoordinator):
             "current_date": self._backfill_current,
         }
 
-    @staticmethod
-    def _row_to_slice(day: date, row: dict) -> dict:
-        start = DynamicDataCoordinator._row_datetime(day, row)
-        end = start + timedelta(hours=1)
-        return {
-            "start": start.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            "end": end.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            "value": float(row["price"]),
-        }
-
-    @staticmethod
-    def _row_datetime(day: date, row: dict) -> datetime:
-        naive = datetime.combine(day, datetime.min.time()) + timedelta(
-            hours=int(row["hour"])
-        )
-        return ROMANIAN_TIMEZONE.localize(naive)
-
 
 # Sensor classes (kept identical to v1.x so upgrades don't break dashboards)
 class DynamicBaseSensor(SensorEntity):
     """Base class for Romania Dynamic sensors."""
 
-    def __init__(self, coordinator, sensor_type):
-        """Initialize the sensor."""
+    def __init__(self, coordinator, sensor_type, id_hint=None):
+        """Initialize the sensor.
+
+        ``id_hint`` overrides the text used to build the unique_id so existing
+        entity IDs keep working even when the display name changes.
+        """
         self.coordinator = coordinator
         self._sensor_type = sensor_type
+        self._id_hint = id_hint or sensor_type
         # A price (lei/MWh) is a *measurement*, not a cumulative monetary
         # total. HA rejects MONETARY + MEASUREMENT (MONETARY would require
         # state_class "total"), so leave the device class unset and keep the
@@ -798,7 +740,7 @@ class DynamicBaseSensor(SensorEntity):
     @property
     def unique_id(self):
         """Return a unique ID."""
-        return f"dynamic_{self._sensor_type.lower().replace(' ', '_')}"
+        return f"dynamic_{self._id_hint.lower().replace(' ', '_')}"
 
     @property
     def available(self):
@@ -811,11 +753,15 @@ class DynamicBaseSensor(SensorEntity):
 
 
 class DynamicCurrentPriceSensor(DynamicBaseSensor):
-    """Current hour price sensor."""
+    """Current 15-minute block price sensor."""
 
     def __init__(self, coordinator):
         """Initialize the sensor."""
-        super().__init__(coordinator, "Current Hour Price")
+        super().__init__(
+            coordinator,
+            "Current Price (15 min)",
+            id_hint="current_hour_price",
+        )
         self._attr_native_unit_of_measurement = "lei/MWh"
 
     @property
@@ -836,6 +782,8 @@ class DynamicCurrentPriceSensor(DynamicBaseSensor):
 
         return {
             "state_class": "measurement",
+            "current_interval": data.get("current_interval"),
+            "resolution": data.get("resolution", "15m"),
             "average": stats.get("average", 0),
             "off_peak_1": stats.get("off_peak_1", 0),
             "off_peak_2": stats.get("off_peak_2", 0),
@@ -938,19 +886,23 @@ class DynamicDownloadStatusSensor(DynamicBaseSensor):
 
 
 class DynamicForecastSensor(DynamicBaseSensor):
-    """Next hour forecast sensor."""
+    """Next 15-minute block forecast sensor."""
 
     def __init__(self, coordinator):
         """Initialize the sensor."""
-        super().__init__(coordinator, "Next Hour Forecast")
+        super().__init__(
+            coordinator,
+            "Next 15-min Price",
+            id_hint="next_hour_forecast",
+        )
         self._attr_native_unit_of_measurement = "lei/MWh"
 
     @property
     def native_value(self):
-        """Return the next hour forecast price."""
+        """Return the next 15-minute block price."""
         if not self.coordinator.data:
             return 0
-        return self.coordinator.data.get("next_hour_price", 0)
+        return self.coordinator.data.get("next_interval_price", 0)
 
     @property
     def extra_state_attributes(self):

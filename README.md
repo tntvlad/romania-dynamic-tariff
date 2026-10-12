@@ -7,9 +7,14 @@ A Home Assistant integration that downloads and displays day-ahead electricity
 prices from the Romanian electricity market (OPCOM / PZU-DAM), with local
 history, configurable retention and a live progress sensor.
 
+Prices are consumed at **15-minute granularity** (96 intervals per day, 100 on
+the autumn DST day and 92 in spring) — the resolution OPCOM has traded since
+2025-10-01.
+
 ## Features
 
-- Downloads current and next-day day-ahead prices from OPCOM
+- Downloads current and next-day day-ahead prices from OPCOM (**15-minute
+  intervals**)
 - **Stores price history in a local SQLite database** (instead of thousands of
   per-day CSV/JSON files)
 - **Configurable data retention** — keep everything, or automatically prune to
@@ -20,10 +25,11 @@ history, configurable retention and a live progress sensor.
   after OPCOM publishes them, instead of all night
 - One-time, automatic import of any existing `romania_dynamic_data/*.json|.csv`
   files into the database
-- Provides current hour, daily average, and next-hour forecast sensors with rich
-  attributes (peak / off-peak / min / max, raw hourly data for cards, including
-  **yesterday** so cards can show a rolling last-24 h window)
-- Correct Romanian timezone handling (EET/EEST)
+- Provides current 15-minute, daily average, and next-15-minute forecast
+  sensors with rich attributes (peak / off-peak / min / max, raw 15-minute data
+  for cards, including **yesterday** so cards can show a rolling last-24 h
+  window)
+- Correct Romanian timezone handling (EET/EEST), including DST days
 
 ## Requirements
 
@@ -110,6 +116,42 @@ Price history is stored in a single SQLite database (WAL mode):
 database path, row count, and first/last stored dates, so you can confirm at a
 glance how much history you are keeping.
 
+### 15-minute granularity (v1.3.0)
+
+OPCOM moved to quarter-hourly products on **2025-10-01**; since then a day has
+96 prices (100 / 92 on the DST days). This version stores every price keyed by
+its OPCOM interval number and exposes the **current 15-minute block** instead
+of an hour-wide average.
+
+The database is migrated automatically on first start of v1.3.0:
+
+- History from before 2025-10-01 (which was only ever published hourly) is
+  expanded into 15-minute rows (each hour's price repeated for its 4 quarters,
+  volume split equally) so every day has the same shape.
+- The old table is kept as `hourly_prices_v1` (reversible — nothing is
+  deleted).
+- Existing entity IDs (`sensor.dynamic_current_hour_price`,
+  `sensor.dynamic_next_hour_forecast`, …) are **unchanged**, so dashboards and
+  automations keep working. Their *meaning* changed:
+
+| Was (hourly) | Now (15-minute) |
+| --- | --- |
+| `current hour price` | current 15-minute block price (updates at :00/:15/:30/:45) |
+| `next hour forecast` | price of the next 15-minute block |
+| `peak` was sliced from array positions | **exact OPCOM band** `33–80` = 08:00–20:00 |
+| `off_peak_1/2` sliced positions | **exact OPCOM bands** `1–32` / `81–96` |
+| `forecast_prices[*].hour` | `forecast_prices[*].interval` + `start` (15-min) |
+| `yesterday/today/tomorrow` | still flat price lists, now 96 entries = true 15-min values |
+
+Cards that consume `raw_yesterday` / `raw_today` / `raw_tomorrow` (the README
+examples below) need **no changes** — the slices now simply cover 15 minutes
+each.
+
+> **Note:** days with a few intervals missing (OPCOM left the closing price
+> empty because nothing traded) keep only the published intervals — the
+> current-price sensor falls back to the last available price, and the cards
+> simply show a gap.
+
 ### Migrating from file storage
 
 On first start, any old per-day `romania_dynamic_data/*.json|.csv` files are
@@ -121,9 +163,9 @@ imported into the database once (idempotent — safe across restarts). Enable
 
 | Entity | Description |
 | --- | --- |
-| `sensor.dynamic_current_hour_price` | Current hour price |
+| `sensor.dynamic_current_hour_price` | Price of the **current 15-minute block** (entity ID kept from v1.x for dashboard compatibility) |
 | `sensor.dynamic_daily_average_price` | Average price for today |
-| `sensor.dynamic_next_hour_forecast` | Price for the next hour |
+| `sensor.dynamic_next_hour_forecast` | Price of the **next 15-minute block** |
 | `sensor.dynamic_download_status` | History / backfill progress (0–100 %) |
 
 All price sensors use the unit **`lei/MWh`** (RON per MWh) and the
@@ -151,23 +193,31 @@ Extra attributes: `status` (text, e.g. `Backfilling (42%)` / `Backfill complete`
 
 `sensor.dynamic_current_hour_price` provides:
 
-- `average`: Daily average price
-- `peak`: Average peak price (08:00–20:00)
-- `off_peak_1`: Average off-peak price (00:00–08:00)
-- `off_peak_2`: Average off-peak price (20:00–24:00)
+- `current_interval`: the OPCOM interval number of the current 15-minute block
+  (1–96, 100/92 on DST days)
+- `resolution`: `"15m"`
+- `average`: Daily average price (mean over today's 15-minute prices)
+- `peak`: Average peak price — **exact OPCOM band** intervals `33–80`
+  (08:00–20:00)
+- `off_peak_1` / `off_peak_2`: Average off-peak price — exact OPCOM bands
+  intervals `1–32` (00:00–08:00) / `81–96` (20:00–24:00)
+- `off_peak`: Combined off-peak average (everything outside the peak band)
 - `min` / `max` / `mean`: Daily price statistics
 - `low_price`: `true` when the current price is below the daily average
 - `price_percent_to_average`: Current price / daily average (1.0 = equal)
 - `unit` / `currency` / `region`: `kWh` / `RON` / `RO`
-- `yesterday` / `today` / `tomorrow`: Flat lists of hourly prices
+- `yesterday` / `today` / `tomorrow`: Flat lists of **15-minute** prices
+  (96 entries per day; 100/92 on DST days)
 - `tomorrow_valid`: Whether next-day data is available yet
-- `raw_yesterday` / `raw_today` / `raw_tomorrow`: Hourly slices with ISO
+- `raw_yesterday` / `raw_today` / `raw_tomorrow`: **15-minute slices** with ISO
   timestamps (`start`, `end`, `value`) for cards. `raw_yesterday` is what makes
   a rolling "last 24 h" view possible across midnight.
 - `storage`: Database path, row count and stored date span
 - `last_updated`, `source`
 
-`sensor.dynamic_next_hour_forecast` additionally exposes `forecast_prices`.
+`sensor.dynamic_next_hour_forecast` additionally exposes `forecast_prices` — one
+entry per published 15-minute interval of tomorrow, each with `price`,
+`interval` and `start` (ISO timestamp of the interval start).
 
 ## Lovelace card example
 
@@ -181,7 +231,7 @@ chart that seems to start and end at odd hours (e.g. only noon → midnight).
 The card below shows the **previous 24 hours together with every available
 future price**. It anchors the window at the start of *yesterday* and spans three
 full days, so the right edge of the chart lands exactly on the **last published
-hour of tomorrow** — nothing is cut off and nothing is faked:
+15-minute interval of tomorrow** — nothing is cut off and nothing is faked:
 
 ```yaml
 type: custom:apexcharts-card
@@ -203,7 +253,7 @@ series:
     type: column
     color: '#e74c3c'
     show:
-      in_header: before_now   # header shows the current hour (e.g. 10:00–11:00)
+      in_header: before_now   # header shows the current 15-min block (e.g. 10:30–10:45)
     data_generator: |
       // yesterday 00:00 → tomorrow 24:00, i.e. past + all published future
       const prices = [
@@ -215,18 +265,18 @@ series:
 ```
 
 > **Why three days?** Day-ahead prices are only published one day ahead, so the
-> last price that can ever exist is the final hour of *tomorrow*. Anchoring the
-> graph from *yesterday 00:00* to *tomorrow 24:00* guarantees the chart always
-> ends on that last available price, while still showing at least the last 24 h.
-> Before ~13:00 the tomorrow columns are simply empty because OPCOM has not
-> published them yet.
+> last price that can ever exist is the final 15-minute interval of *tomorrow*.
+> Anchoring the graph from *yesterday 00:00* to *tomorrow 24:00* guarantees the
+> chart always ends on that last available price, while still showing at least
+> the last 24 h. Before ~13:00 the tomorrow columns are simply empty because
+> OPCOM has not published them yet.
 
 > **Why `in_header: before_now`?** With `header.show_states: true`, the card
 > displays the **last value of the series** by default. Because this series runs
-> into the future, that would be tomorrow's final hour — not the price you are
-> paying right now. `before_now` pins the header to the value just before the
-> current time, i.e. the current hour (at 10:36 it shows the 10:00–11:00 price).
-> Use `after_now` if you would rather see the next hour.
+> into the future, that would be tomorrow's final interval — not the price you
+> are paying right now. `before_now` pins the header to the value just before
+> the current time, i.e. the current 15-minute block (at 10:36 it shows the
+> 10:30–10:45 price). Use `after_now` if you would rather see the next one.
 
 ### Rolling 24 h + 24 h (always centred on now)
 
